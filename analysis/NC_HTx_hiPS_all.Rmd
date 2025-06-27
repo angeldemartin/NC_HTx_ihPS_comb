@@ -1,0 +1,356 @@
+---
+title: "NC_HTx_hiPS_all"
+author: "A.DeMartin"
+date: "2025-06-25"
+output: 
+  html_document:
+    keep_md: true
+    toc: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, echo = FALSE}
+options(width = 100)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, dev = c("png", "pdf"))
+seed <- 1234
+```
+
+```{r}
+library(here)
+library(tximeta)
+library(DESeq2)
+library(vsn)
+library(pheatmap)
+library(RColorBrewer)
+library(biomaRt)
+library(tidyverse)
+library(msigdbr)
+library(clusterProfiler)
+library(ggpubr)
+library(EnhancedVolcano)
+```
+
+```{r}
+basedir <- "/Users/immbio/Desktop/Project/Angelina/NC_HTx_ihPS_comb/data/"
+```
+
+## load data and create a SummarizedExperiment
+```{r, eval=FALSE, include=TRUE}
+target_folder <- file.path(basedir, "all")
+folders <- list.dirs(path = target_folder, full.names = TRUE, recursive = FALSE)
+folder_names <- basename(folders)
+
+coldata <- data.frame(names = folder_names)
+
+coldata$files <- file.path(paste0(folders), "quant.sf")
+
+file.exists(coldata$files)
+se <- tximeta(coldata)
+
+dim(se)
+
+head(rownames(se))
+gse <- summarizeToGene(se)
+
+dim(gse)
+head(rownames(gse))
+
+gse@assays
+assayNames(gse)
+
+coldata$names
+```
+
+### add metadata
+```{r add meta, eval=FALSE, include=TRUE}
+#assign stimulation condition
+colData(gse)$stim <- "stim"
+colData(gse)$stim[grepl("FCS", colData(gse)$names)] <- "ctr"
+colData(gse)$stim[grepl("BMP", colData(gse)$names)] <- "BMP"
+table(colData(gse)$stim)
+colData(gse)$stim <- as.factor(colData(gse)$stim)
+
+#assign celltype
+colData(gse)$celltype <- "celltype"
+colData(gse)$celltype[grepl("CM", colData(gse)$names)] <- "CM"
+colData(gse)$celltype[grepl("CF", colData(gse)$names)] <- "CF"
+table(colData(gse)$celltype)
+colData(gse)$celltype <- as.factor(colData(gse)$celltype)
+
+#assign experiment origin
+colData(gse)$exporig <- "exporig"
+colData(gse)$exporig[grepl("HTx_02", colData(gse)$names)] <- "HTx_02"
+colData(gse)$exporig[grepl("HTx_03", colData(gse)$names)] <- "HTx_03"
+table(colData(gse)$exporig)
+colData(gse)$exporig <- as.factor(colData(gse)$exporig)
+
+#assign patient code
+colData(gse)$pc <- "pc"
+colData(gse)$pc[grepl("CM1", colData(gse)$names)] <- "CM1"
+colData(gse)$pc[grepl("CM2", colData(gse)$names)] <- "CM2"
+colData(gse)$pc[grepl("CM3", colData(gse)$names)] <- "CM3"
+colData(gse)$pc[grepl("CM14", colData(gse)$names)] <- "CM14"
+colData(gse)$pc[grepl("CM15", colData(gse)$names)] <- "CM15"
+colData(gse)$pc[grepl("Fibro1", colData(gse)$names)] <- "Fibro1"
+colData(gse)$pc[grepl("Fibro3", colData(gse)$names)] <- "Fibro3"
+colData(gse)$pc[grepl("CF1", colData(gse)$names)] <- "CF1"
+colData(gse)$pc[grepl("CF2", colData(gse)$names)] <- "CF2"
+table(colData(gse)$pc)
+colData(gse)$pc <- as.factor(colData(gse)$pc)
+
+saveRDS(gse, file=paste0(basedir, "gse_allBMP_ctr_24h.rds"))
+```
+
+```{r, eval=TRUE, include=TRUE}
+gse <- readRDS(file=paste0(basedir, "gse_allBMP_ctr_24h.rds"))
+```
+
+## sample distance
+### construct a DESeqDataSet celltype + stim
+```{r construct DESeqDataSet object celltype}
+##construct a DESeqDataSet object
+#dds <- DESeqDataSet(gse, design = ~ cell + dex)
+dds <- DESeqDataSet(gse, design = ~ celltype  + exporig + stim)
+
+## pre-filtering
+nrow(dds)
+smallestGroupSize <- 2
+keep <- rowSums(counts(dds) >= 10) >= smallestGroupSize
+dds <- dds[keep,]
+nrow(dds)
+
+## variance stabilizing transformation
+lambda <- 10^seq(from = -1, to = 2, length = 1000)
+cts <- matrix(rpois(1000*100, lambda), ncol = 100)
+meanSdPlot(cts, ranks = FALSE)
+
+log.cts.one <- log2(cts + 1)
+meanSdPlot(log.cts.one, ranks = FALSE)
+
+vsd <- vst(dds, blind = FALSE)
+rld <- rlog(dds, blind = FALSE)
+
+dds <- estimateSizeFactors(dds)
+
+##RNA-seq counts, however, the expected variance grows with the mean
+df <- bind_rows(
+  as_data_frame(log2(counts(dds, normalized=TRUE)[, 1:2]+1)) %>%
+         mutate(transformation = "log2(x + 1)"),
+  as_data_frame(assay(vsd)[, 1:2]) %>% mutate(transformation = "vst"),
+  as_data_frame(assay(rld)[, 1:2]) %>% mutate(transformation = "rlog"))
+  
+colnames(df)[1:2] <- c("x", "y")  
+
+lvls <- c("log2(x + 1)", "vst", "rlog")
+df$transformation <- factor(df$transformation, levels=lvls)
+
+ggplot(df, aes(x = x, y = y)) + geom_hex(bins = 80) +
+  coord_fixed() + facet_grid( . ~ transformation)  
+```
+
+### sample distance
+```{r distance, include=FALSE, eval=TRUE, echo=TRUE}
+sampleDists <- dist(t(assay(rld)))
+sampleDists
+```
+
+### distance heatmap
+```{r distance heatmap}
+sampleDistMatrix <- as.matrix( sampleDists )
+rownames(sampleDistMatrix) <- paste(rld$stim, rld$celltype ,rld$exporig, sep = " - " )
+colnames(sampleDistMatrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "BuPu")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")) )(255)
+pheatmap(sampleDistMatrix,
+         clustering_distance_rows = sampleDists,
+         clustering_distance_cols = sampleDists,
+         col = colors)
+```
+
+### distance MDS
+```{r vis dim red bulk}
+colCond <- c("#213782", "darkgrey")
+names(colCond) <- c("BMP","ctr")
+
+#plotPCA(rld, intgroup = c("cond", "grp"))
+plotPCA(rld, intgroup = c("stim", "celltype", "exporig")) +
+  geom_point(aes(color = stim), size = 8, alpha = 0.8) +
+  scale_color_manual(values = colCond) # size = dot size, alpha = transparency
+
+mds <- as.data.frame(colData(rld))  %>%
+         cbind(cmdscale(sampleDistMatrix))
+ggplot(mds, aes(x = `1`, y = `2`, color = stim, shape = celltype)) +
+  geom_point(size = 4, alpha = 0.8) +
+  scale_color_manual(values = colCond) +
+  geom_point(size = 4) + coord_fixed() + ggtitle("MDS with rld data") +
+  facet_wrap(~ exporig) 
+```
+
+### diff expressed in CM vs CF
+```{r}
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("celltype", "CM", "CF")) ## define which conditions to contrast
+#res <- results(dds)
+res
+
+genes <- data.frame(ensID=rownames(res))
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+G_list <- getBM(attributes=c('hgnc_symbol', 'ensembl_gene_id'), 
+      filters = 'ensembl_gene_id', 
+      values = genes$ensID, 
+      mart = mart)
+
+resDat <- data.frame(res@listData) %>% mutate(ensembl_gene_id = rownames(res)) %>% 
+  left_join(., G_list, by= "ensembl_gene_id")
+```
+
+### top 100 heatmap
+```{r top 100 CM vs CF heatmap, fig.height=12, fig.width=6}
+colCond <- c("#355C7D","#A59C94")
+names(colCond) <- c("BMP","ctr")
+
+colcelltype <- c("#822145", "#f4a582")
+names(colcelltype) <- c("CM", "CF")
+
+colexporig <- c("#779d8d","#E6F598")
+names(colexporig) <- c("HTx_02", "HTx_03")
+
+topGenes <- head(order(res$padj),100)
+#topGenes <- resDat$ensembl_gene_id[which(resDat$padj < 0.01)]
+
+mat  <- assay(rld)[ topGenes, ]
+namesDat <- data.frame(ensembl_gene_id = rownames(mat)) %>%
+  left_join(., G_list, by= "ensembl_gene_id")
+
+# Define annotation colors
+ann_colors <- list(
+  stim = colCond,
+  celltype = colcelltype,
+  exporig = colexporig)
+
+anno <- as.data.frame(colData(rld)[, c("stim","celltype", "exporig")])
+
+# custom heatmap colors
+heat_colors <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(50)
+
+pheatmap(mat, annotation_col = anno, annotation_colors = ann_colors, scale = "row",
+         labels_row = namesDat$hgnc_symbol, color = heat_colors, labels_col = rep("", ncol(mat)))
+```
+
+
+
+### diff expressed in HTx_02 vs HTx_03
+```{r}
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("exporig", "HTx_02", "HTx_03")) ## define which conditions to contrast
+#res <- results(dds)
+res
+
+genes <- data.frame(ensID=rownames(res))
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+G_list <- getBM(attributes=c('hgnc_symbol', 'ensembl_gene_id'), 
+      filters = 'ensembl_gene_id', 
+      values = genes$ensID, 
+      mart = mart)
+
+resDat <- data.frame(res@listData) %>% mutate(ensembl_gene_id = rownames(res)) %>% 
+  left_join(., G_list, by= "ensembl_gene_id")
+```
+
+### top 100 heatmap
+```{r top 100 HTx_02 vs HTx_03 heatmap, fig.height=12, fig.width=6}
+colCond <- c("#355C7D","#A59C94")
+names(colCond) <- c("BMP","ctr")
+
+colcelltype <- c("#822145", "#f4a582")
+names(colcelltype) <- c("CM", "CF")
+
+colexporig <- c("#779d8d","#E6F598")
+names(colexporig) <- c("HTx_02", "HTx_03")
+
+topGenes <- head(order(res$padj),100)
+#topGenes <- resDat$ensembl_gene_id[which(resDat$padj < 0.01)]
+
+mat  <- assay(rld)[ topGenes, ]
+namesDat <- data.frame(ensembl_gene_id = rownames(mat)) %>%
+  left_join(., G_list, by= "ensembl_gene_id")
+
+# Define annotation colors
+ann_colors <- list(
+  stim = colCond,
+  celltype = colcelltype,
+  exporig = colexporig)
+
+anno <- as.data.frame(colData(rld)[, c("stim","celltype", "exporig")])
+
+# custom heatmap colors
+heat_colors <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(50)
+
+pheatmap(mat, annotation_col = anno, annotation_colors = ann_colors, scale = "row",
+         labels_row = namesDat$hgnc_symbol, color = heat_colors, labels_col = rep("", ncol(mat)))
+```
+
+### diff expressed in BMP4 vs ctr
+```{r}
+dds <- DESeq(dds)
+res <- results(dds, contrast = c("stim", "BMP", "ctr")) ## define which conditions to contrast
+#res <- results(dds)
+res
+
+genes <- data.frame(ensID=rownames(res))
+mart <- useDataset("hsapiens_gene_ensembl", useMart("ensembl"))
+
+G_list <- getBM(attributes=c('hgnc_symbol', 'ensembl_gene_id'), 
+      filters = 'ensembl_gene_id', 
+      values = genes$ensID, 
+      mart = mart)
+
+resDat <- data.frame(res@listData) %>% mutate(ensembl_gene_id = rownames(res)) %>% 
+  left_join(., G_list, by= "ensembl_gene_id")
+```
+### top 100 heatmap
+```{r top 100 BMP vs ctr heatmap, fig.height=12, fig.width=6}
+colCond <- c("#355C7D","#A59C94")
+names(colCond) <- c("BMP","ctr")
+
+colcelltype <- c("#822145", "#f4a582")
+names(colcelltype) <- c("CM", "CF")
+
+colexporig <- c("#779d8d","#E6F598")
+names(colexporig) <- c("HTx_02", "HTx_03")
+
+topGenes <- head(order(res$padj),100)
+#topGenes <- resDat$ensembl_gene_id[which(resDat$padj < 0.01)]
+
+mat  <- assay(rld)[ topGenes, ]
+namesDat <- data.frame(ensembl_gene_id = rownames(mat)) %>%
+  left_join(., G_list, by= "ensembl_gene_id")
+
+# Define annotation colors
+ann_colors <- list(
+  stim = colCond,
+  celltype = colcelltype,
+  exporig = colexporig)
+
+anno <- as.data.frame(colData(rld)[, c("stim","celltype", "exporig")])
+
+# custom heatmap colors
+heat_colors <- colorRampPalette(c("#2166AC", "#F7F7F7", "#B2182B"))(50)
+
+pheatmap(mat, annotation_col = anno, annotation_colors = ann_colors, scale = "row",
+         labels_row = namesDat$hgnc_symbol, color = heat_colors, labels_col = rep("", ncol(mat)))
+```
+
+## session info
+```{r session info}
+sessionInfo()
+date()
+```
