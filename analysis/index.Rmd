@@ -11,3 +11,11 @@ editor_options:
 ### all combined
 distance and DE genes
 [link](NC_HTx_hiPS_all.html)
+
+### CM combined
+distance and DE genes
+[link](CM_comb.html)
+
+### CM combined
+distance and DE genes
+[link](CF_comb.html)
